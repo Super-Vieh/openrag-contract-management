@@ -2,6 +2,7 @@
 
 import {
   EllipsisVertical,
+  FileSignature,
   FileText,
   Library,
   MessageSquare,
@@ -254,6 +255,13 @@ export function Navigation({
       ]),
     },
     {
+      label: "Contract Management",
+      icon: FileSignature,
+      href: "/vertragsmanagement",
+      active: pathname.startsWith("/vertragsmanagement"),
+      visible: true,
+    },
+    {
       label: "Settings",
       icon: Settings2,
       href: "/settings",
@@ -415,7 +423,6 @@ export function Navigation({
           onFilterSelect={setSelectedFilter}
         />
       )}
-
       {/* Chat Page Specific Sections */}
       {isOnChatPage && (
         <div className="flex-1 min-h-0 flex flex-col px-4">

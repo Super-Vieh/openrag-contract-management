@@ -52,3 +52,10 @@ documents/docling.pdf
 /opensearch-data-new-lf
 /opensearch-data2
 *.db
+
+# Generierte Guide-/Erklär-Dokumente (nicht versionieren)
+openrag-dev-guide/
+openrag-tsx-basics/
+
+# graphify-Wissensgraph-Output
+graphify-out/

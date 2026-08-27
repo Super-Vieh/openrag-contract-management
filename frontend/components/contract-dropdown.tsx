@@ -1,0 +1,1048 @@
+"use client";
+
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  ChevronDown,
+  File as FileIcon,
+  Folder,
+  FolderOpen,
+  Loader2,
+  PlugZap,
+} from "lucide-react";
+import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
+import type { File as SearchFile } from "@/app/api/queries/useGetSearchQuery";
+import { useGetTasksQuery } from "@/app/api/queries/useGetTasksQuery";
+import { DuplicateHandlingDialog } from "@/components/duplicate-handling-dialog";
+import { IngestReviewDialog } from "@/components/ingest-review";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { useAuth } from "@/contexts/auth-context";
+import { useIsCloudBrand } from "@/contexts/brand-context";
+import { useTask } from "@/contexts/task-context";
+import { shouldAutoOpenIngestPreview } from "@/hooks/use-ingest-preview-settings";
+import { usePermissions } from "@/hooks/use-permissions";
+import { useSupportedFileTypes } from "@/hooks/use-supported-file-types";
+import {
+  trackButton,
+  trackProcessFailure,
+  trackStartProcess,
+} from "@/lib/analytics";
+import {
+  getConnectorDescriptor,
+  getConnectorDescriptors,
+} from "@/lib/connectors/registry";
+import {
+  EMPTY_PREVIEW,
+  isIngestPreviewEnabled,
+  type PreviewDialogState,
+} from "@/lib/ingest-preview";
+import {
+  duplicateCheck,
+  uploadFiles,
+  uploadFile as uploadFileUtil,
+} from "@/lib/upload-utils";
+import { cn } from "@/lib/utils";
+
+const getFilenameVariants = (filename: string): string[] => {
+  const dotIndex = filename.lastIndexOf(".");
+  if (dotIndex === -1) return [filename];
+
+  const baseName = filename.slice(0, dotIndex);
+  const extension = filename.slice(dotIndex).toLowerCase();
+
+  if (extension === ".txt") return [filename, `${baseName}.md`];
+  if (extension === ".md") return [filename, `${baseName}.txt`];
+
+  return [filename];
+};
+
+const isDuplicateFile = async (file: File): Promise<boolean> => {
+  const variants = getFilenameVariants(file.name);
+  const checks = await Promise.all(
+    variants.map(async (variantName) => {
+      const variantFile =
+        variantName === file.name
+          ? file
+          : new File([file], variantName, {
+              type: file.type,
+              lastModified: file.lastModified,
+            });
+      const checkData = await duplicateCheck(variantFile);
+      return checkData.exists;
+    }),
+  );
+  return checks.some(Boolean);
+};
+
+const FileIconWithColor = ({ className }: { className?: string }) => (
+  <FileIcon className={cn(className, "text-muted-foreground")} />
+);
+
+const FolderIconWithColor = ({ className }: { className?: string }) => (
+  <Folder className={cn(className, "text-muted-foreground")} />
+);
+
+export function ContractDropdown() {
+  const { runMode } = useAuth();
+  const { supportedExtensions, supportedExtensionSet } =
+    useSupportedFileTypes();
+  const { can } = usePermissions();
+  const canUpload = can("knowledge:upload");
+  const isCloudBrand = useIsCloudBrand();
+  const { addTask } = useTask();
+  const { refetch: refetchTasks } = useGetTasksQuery();
+  const queryClient = useQueryClient();
+  const router = useRouter();
+  const ingestPreviewEnabled = isIngestPreviewEnabled(runMode, {
+    isCloudBrand,
+  });
+  const [mounted, setMounted] = useState(false);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [showFolderDialog, setShowFolderDialog] = useState(false);
+  const [showDuplicateDialog, setShowDuplicateDialog] = useState(false);
+  const [uploadBatchSize, setUploadBatchSize] = useState(25);
+  const [folderPath, setFolderPath] = useState("");
+  const [folderLoading, setFolderLoading] = useState(false);
+  const [fileUploading, setFileUploading] = useState(false);
+  const [isNavigatingToCloud, setIsNavigatingToCloud] = useState(false);
+  const [bucketConnectorConfigured, setBucketConnectorConfigured] = useState<
+    Record<string, boolean>
+  >({});
+  const [bucketConnectorAvailable, setBucketConnectorAvailable] = useState<
+    Record<string, boolean>
+  >({});
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [duplicateFilename, setDuplicateFilename] = useState<string>("");
+  const [preview, setPreview] = useState<PreviewDialogState>(EMPTY_PREVIEW);
+  const [pendingFolderUpload, setPendingFolderUpload] = useState<{
+    allFiles: File[];
+    nonDuplicateFiles: File[];
+    duplicateNames: string[];
+    unsupportedCount: number;
+  } | null>(null);
+  const isFolderOverwriteConfirmedRef = useRef(false);
+  const [cloudConnectors, setCloudConnectors] = useState<{
+    [key: string]: {
+      name: string;
+      available: boolean;
+      connected: boolean;
+      hasToken: boolean;
+    };
+  }>({});
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+
+  const resetDuplicateDialogState = () => {
+    setPendingFolderUpload(null);
+    setPendingFile(null);
+    setDuplicateFilename("");
+  };
+
+  // Check AWS availability and cloud connectors on mount
+  useEffect(() => {
+    const checkAvailability = async () => {
+      try {
+        const bucketDescriptors = getConnectorDescriptors().filter(
+          (d) => d.kind === "bucket",
+        );
+
+        // Check upload batch size and bucket connector availability in parallel
+        const [uploadOptionsRes, ...bucketResponses] = await Promise.all([
+          fetch("/api/upload_options"),
+          ...bucketDescriptors.map((d) =>
+            fetch(`/api/connectors/${d.connectorType}/defaults`),
+          ),
+        ]);
+
+        if (uploadOptionsRes.ok) {
+          const uploadOptionsData = await uploadOptionsRes.json();
+          if (
+            typeof uploadOptionsData.upload_batch_size === "number" &&
+            uploadOptionsData.upload_batch_size > 0
+          ) {
+            setUploadBatchSize(uploadOptionsData.upload_batch_size);
+          }
+        }
+
+        const configured: Record<string, boolean> = {};
+        await Promise.all(
+          bucketResponses.map(async (res, i) => {
+            const descriptor = bucketDescriptors[i];
+            if (!res.ok) return;
+            const data = await res.json();
+            // Generic predicate: connection_id set OR any *_set boolean is true.
+            const anySetFlag = Object.entries(data).some(
+              ([k, v]) => k.endsWith("_set") && v === true,
+            );
+            configured[descriptor.connectorType] = Boolean(
+              data.connection_id || anySetFlag,
+            );
+          }),
+        );
+        setBucketConnectorConfigured(configured);
+
+        // Check cloud connectors
+        const connectorsRes = await fetch("/api/connectors");
+        if (connectorsRes.ok) {
+          const connectorsResult = await connectorsRes.json();
+
+          // Bucket connector availability mirrors the backend `is_available()`
+          // gate (IBM auth, or the dev flag for Azure Blob), so the dropdown
+          // surfaces a bucket entry whenever the connector is actually usable —
+          // not only in IBM auth mode.
+          const bucketAvailable: Record<string, boolean> = {};
+          for (const d of bucketDescriptors) {
+            bucketAvailable[d.connectorType] = Boolean(
+              connectorsResult.connectors?.[d.connectorType]?.available,
+            );
+          }
+          setBucketConnectorAvailable(bucketAvailable);
+
+          const cloudConnectorTypes = [
+            "google_drive",
+            "onedrive",
+            "sharepoint",
+          ];
+          const connectorInfo: {
+            [key: string]: {
+              name: string;
+              available: boolean;
+              connected: boolean;
+              hasToken: boolean;
+            };
+          } = {};
+
+          const availableTypes = cloudConnectorTypes.filter(
+            (type) => connectorsResult.connectors?.[type],
+          );
+
+          for (const type of availableTypes) {
+            connectorInfo[type] = {
+              name: connectorsResult.connectors?.[type]?.name ?? type,
+              available:
+                connectorsResult.connectors?.[type]?.available ?? false,
+              connected: false,
+              hasToken: false,
+            };
+          }
+
+          await Promise.all(
+            availableTypes.map(async (type) => {
+              try {
+                const statusRes = await fetch(`/api/connectors/${type}/status`);
+                if (!statusRes.ok) return;
+
+                const statusData = await statusRes.json();
+                const connections = statusData.connections || [];
+                const activeConnection = connections.find(
+                  (conn: { is_active: boolean; connection_id: string }) =>
+                    conn.is_active,
+                );
+                if (!activeConnection) return;
+
+                connectorInfo[type].connected = true;
+
+                try {
+                  const tokenRes = await fetch(
+                    `/api/connectors/${type}/token?connection_id=${activeConnection.connection_id}`,
+                  );
+                  if (tokenRes.ok) {
+                    const tokenData = await tokenRes.json();
+                    if (tokenData.access_token) {
+                      connectorInfo[type].hasToken = true;
+                    }
+                  }
+                } catch {
+                  // Token check failed
+                }
+              } catch {
+                // Status check failed
+              }
+            }),
+          );
+
+          setCloudConnectors(connectorInfo);
+        }
+      } catch (err) {
+        console.error("Failed to check availability", err);
+      }
+    };
+    checkAvailability();
+  }, []);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  const handleFileUpload = () => {
+    fileInputRef.current?.click();
+  };
+
+  const resetFileInput = () => {
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
+
+  const handleFileChange = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const files = event.target.files;
+
+    if (files && files.length > 0) {
+      const file = files[0];
+
+      // File selection will close dropdown automatically
+
+      try {
+        const exists = await isDuplicateFile(file);
+
+        if (exists) {
+          resetDuplicateDialogState();
+          setPendingFile(file);
+          setDuplicateFilename(file.name);
+          setShowDuplicateDialog(true);
+          resetFileInput();
+          return;
+        }
+        await uploadFile(file, false);
+      } catch (error) {
+        console.error("[Duplicate Check] Exception:", error);
+        toast.error("Failed to check for duplicates", {
+          description: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    }
+
+    resetFileInput();
+  };
+
+  const openPreviewForFiles = (files: File[], label: string) => {
+    if (!(ingestPreviewEnabled && shouldAutoOpenIngestPreview())) {
+      return;
+    }
+    setPreview({
+      open: true,
+      taskIds: [],
+      filename: label,
+      files,
+    });
+  };
+
+  /**
+   * Bind upload task IDs into the review dialog.
+   *
+   * Previously this always spread `prev` and only set `taskIds`. When Knowledge
+   * auto-open is off, `openPreviewForFiles` never runs, so `prev.open` stays
+   * false and the dialog kept a taskId while remaining invisible.
+   *
+   * Rules:
+   * - Dialog already open → attach taskIds (normal auto-open path).
+   * - Dialog closed but auto-open is on → open now with files (recovers a
+   *   missed optimistic open).
+   * - Dialog closed and auto-open is off → leave closed; tasks stay in the tray.
+   */
+  const attachPreviewTaskIds = (
+    taskIds: string[],
+    fallback?: { files: File[]; filename: string },
+  ) => {
+    setPreview((prev) => {
+      if (prev.open) {
+        return { ...prev, open: true, taskIds };
+      }
+      if (shouldAutoOpenIngestPreview() && fallback) {
+        return {
+          open: true,
+          taskIds,
+          filename: fallback.filename,
+          files: fallback.files,
+        };
+      }
+      return prev;
+    });
+  };
+
+  const uploadFile = async (file: File, replace: boolean) => {
+    setFileUploading(true);
+    openPreviewForFiles([file], file.name);
+    trackStartProcess({
+      processType: "Ingestion",
+      process: "Document Upload",
+      category: "Knowledge",
+      source: "file",
+      total_files: 1,
+    });
+
+    try {
+      const result = await uploadFileUtil(
+        file,
+        replace,
+        false,
+        undefined,
+        ingestPreviewEnabled,
+      );
+      refetchTasks();
+      if (result.taskId) {
+        // Always track in the task tray; preview dialog is optional (auto-open).
+        addTask(result.taskId, { source: "file" });
+        if (result.previewMode) {
+          attachPreviewTaskIds([result.taskId as string], {
+            files: [file],
+            filename: file.name,
+          });
+        } else {
+          setPreview(EMPTY_PREVIEW);
+        }
+      }
+    } catch (error) {
+      trackProcessFailure({
+        processType: "Ingestion",
+        process: "Document Upload",
+        category: "Knowledge",
+        source: "file",
+        resultValue: error instanceof Error ? error.message : "Unknown error",
+      });
+      // Dispatch event that chat context can listen to
+      // This avoids circular dependency issues
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("ingestionFailed", {
+            detail: { source: "knowledge-dropdown" },
+          }),
+        );
+      }
+      toast.error("Upload failed", {
+        description: error instanceof Error ? error.message : "Unknown error",
+      });
+      setPreview(EMPTY_PREVIEW);
+    } finally {
+      setFileUploading(false);
+    }
+  };
+
+  const uploadFolderBatches = async (
+    filesToUpload: File[],
+    replace: boolean,
+  ) => {
+    trackStartProcess({
+      processType: "Ingestion",
+      process: "Document Upload",
+      category: "Knowledge",
+      source: "folder",
+      total_files: filesToUpload.length,
+    });
+
+    openPreviewForFiles(filesToUpload, `${filesToUpload.length} files`);
+
+    const batches: File[][] = [];
+    for (let i = 0; i < filesToUpload.length; i += uploadBatchSize) {
+      batches.push(filesToUpload.slice(i, i + uploadBatchSize));
+    }
+
+    const taskIdsByBatch: (string | undefined)[] = [];
+    const failedBatchIndexes: number[] = [];
+    // Cap parallel batch uploads so large folders don't open every request at once.
+    const batchConcurrency = Math.min(2, batches.length);
+    let nextBatchIndex = 0;
+    // Set by any worker that gets previewMode=true; checked once after all
+    // batches finish so a concurrent false cannot close a successful open.
+    let previewModeConfirmed = false;
+
+    const runNextBatch = async () => {
+      while (nextBatchIndex < batches.length) {
+        const batchIndex = nextBatchIndex;
+        nextBatchIndex += 1;
+        const batch = batches[batchIndex];
+        if (!batch) continue;
+
+        try {
+          const result = await uploadFiles(
+            batch,
+            replace,
+            ingestPreviewEnabled,
+          );
+          addTask(result.taskId, { source: "folder" });
+          if (result.previewMode) {
+            previewModeConfirmed = true;
+            taskIdsByBatch[batchIndex] = result.taskId;
+            attachPreviewTaskIds(
+              taskIdsByBatch.filter((id): id is string => id !== undefined),
+              {
+                files: filesToUpload,
+                filename: `${filesToUpload.length} files`,
+              },
+            );
+            refetchTasks();
+          }
+        } catch (error) {
+          failedBatchIndexes.push(batchIndex);
+          trackProcessFailure({
+            processType: "Ingestion",
+            process: "Document Upload",
+            category: "Knowledge",
+            source: "folder",
+            resultValue:
+              error instanceof Error ? error.message : "Unknown error",
+          });
+          console.error("[Folder Upload] Batch upload failed:", error);
+          toast.error("Batch upload failed", {
+            description:
+              error instanceof Error ? error.message : "Unknown error",
+          });
+        }
+      }
+    };
+
+    await Promise.all(
+      Array.from({ length: batchConcurrency }, () => runNextBatch()),
+    );
+
+    // Close the optimistic open only after all workers finish. Doing this
+    // inside a worker races: a late previewMode=false can wipe a sibling's
+    // successful open between awaits.
+    if (!previewModeConfirmed) {
+      setPreview(EMPTY_PREVIEW);
+    }
+
+    refetchTasks();
+
+    if (failedBatchIndexes.length > 0) {
+      throw new Error(
+        `${failedBatchIndexes.length} of ${batches.length} batch upload(s) failed`,
+      );
+    }
+  };
+
+  const handleOverwriteFile = async () => {
+    if (pendingFolderUpload) {
+      isFolderOverwriteConfirmedRef.current = true;
+      const { allFiles, duplicateNames, unsupportedCount } =
+        pendingFolderUpload;
+      try {
+        await uploadFolderBatches(allFiles, true);
+        const unsupportedMessage =
+          unsupportedCount > 0
+            ? `, skipped ${unsupportedCount} unsupported`
+            : "";
+        toast.success(
+          `Processed ${allFiles.length} file(s), including ${duplicateNames.length} overwrite(s)${unsupportedMessage}`,
+        );
+      } catch (error) {
+        toast.error("Folder upload incomplete", {
+          description: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+      resetDuplicateDialogState();
+      return;
+    }
+
+    if (pendingFile) {
+      // Remove the old file from all search query caches before overwriting
+      queryClient.setQueriesData({ queryKey: ["search"] }, (oldData: any) => {
+        if (!oldData) return oldData;
+        // Handle SearchResult structure { files: [], warnings: [] }
+        if (oldData.files && Array.isArray(oldData.files)) {
+          return {
+            ...oldData,
+            files: oldData.files.filter(
+              (file: SearchFile) => file.filename !== pendingFile.name,
+            ),
+          };
+        }
+        // Fallback for legacy array format
+        if (Array.isArray(oldData)) {
+          return oldData.filter(
+            (file: SearchFile) => file.filename !== pendingFile.name,
+          );
+        }
+        return oldData;
+      });
+
+      await uploadFile(pendingFile, true);
+
+      resetDuplicateDialogState();
+    }
+  };
+
+  const handleDuplicateDialogOpenChange = async (open: boolean) => {
+    if (!open && pendingFolderUpload) {
+      if (isFolderOverwriteConfirmedRef.current) {
+        isFolderOverwriteConfirmedRef.current = false;
+      } else {
+        const { nonDuplicateFiles, duplicateNames, unsupportedCount } =
+          pendingFolderUpload;
+        if (nonDuplicateFiles.length > 0) {
+          try {
+            await uploadFolderBatches(nonDuplicateFiles, false);
+            const extraParts: string[] = [];
+            if (duplicateNames.length > 0) {
+              extraParts.push(`skipped ${duplicateNames.length} duplicate(s)`);
+            }
+            if (unsupportedCount > 0) {
+              extraParts.push(`skipped ${unsupportedCount} unsupported`);
+            }
+            const suffix =
+              extraParts.length > 0 ? `, ${extraParts.join(", ")}` : "";
+            toast.success(
+              `Processed ${nonDuplicateFiles.length} file(s)${suffix}`,
+            );
+          } catch (error) {
+            toast.error("Folder upload incomplete", {
+              description:
+                error instanceof Error ? error.message : "Unknown error",
+            });
+          }
+        } else {
+          toast.info(
+            "Skipped duplicate files. All selected files were duplicates, so nothing was uploaded.",
+          );
+        }
+      }
+
+      resetDuplicateDialogState();
+    }
+
+    setShowDuplicateDialog(open);
+  };
+
+  const handleFolderSelect = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+
+    setFolderLoading(true);
+
+    try {
+      const fileList = Array.from(files);
+
+      const filteredFiles = fileList.filter((file) => {
+        const ext = file.name
+          .substring(file.name.lastIndexOf("."))
+          .toLowerCase();
+        return supportedExtensionSet.has(ext);
+      });
+      const unsupportedCount = fileList.length - filteredFiles.length;
+
+      if (filteredFiles.length === 0) {
+        toast.error("No supported files found", {
+          description:
+            "Please select a folder containing supported document files (PDF, DOCX, PPTX, XLSX, CSV, HTML, images, etc.).",
+        });
+        return;
+      }
+
+      toast.info(`Processing ${filteredFiles.length} file(s)...`);
+
+      // Create clean File objects (strip folder path from names)
+      const cleanFiles = filteredFiles.map((originalFile) => {
+        const fileName =
+          originalFile.name.split("/").pop() || originalFile.name;
+        return new File([originalFile], fileName, {
+          type: originalFile.type,
+          lastModified: originalFile.lastModified,
+        });
+      });
+
+      // Check all files for duplicates in parallel
+      const duplicateResults = await Promise.all(
+        cleanFiles.map(async (file) => {
+          try {
+            const exists = await isDuplicateFile(file);
+            return { file, isDuplicate: exists };
+          } catch (error) {
+            console.error(
+              `[Folder Upload] Duplicate check failed for ${file.name}:`,
+              error,
+            );
+            // On error, include the file (let the server handle it)
+            return { file, isDuplicate: false };
+          }
+        }),
+      );
+
+      const nonDuplicateFiles = duplicateResults
+        .filter((r) => !r.isDuplicate)
+        .map((r) => r.file);
+      const duplicateNames = duplicateResults
+        .filter((r) => r.isDuplicate)
+        .map((r) => r.file.name);
+      const duplicateCount = duplicateNames.length;
+
+      if (unsupportedCount > 0) {
+        toast.error(
+          `Unsupported files detected: only ${filteredFiles.length} of ${fileList.length} file(s) will be ingested.`,
+          {
+            description: `${unsupportedCount} file(s) have unsupported types and will be skipped.`,
+          },
+        );
+      }
+
+      if (duplicateCount > 0) {
+        resetDuplicateDialogState();
+        setPendingFolderUpload({
+          allFiles: cleanFiles,
+          nonDuplicateFiles,
+          duplicateNames,
+          unsupportedCount,
+        });
+        setShowDuplicateDialog(true);
+        return;
+      }
+
+      if (nonDuplicateFiles.length === 0) {
+        toast.info("All files already exist, nothing to upload.");
+        return;
+      }
+
+      await uploadFolderBatches(nonDuplicateFiles, false);
+      const unsupportedMessage =
+        unsupportedCount > 0 ? `, skipped ${unsupportedCount} unsupported` : "";
+      toast.success(
+        `Successfully processed ${nonDuplicateFiles.length} file(s)${unsupportedMessage}`,
+      );
+    } catch (error) {
+      console.error("Folder upload error:", error);
+      toast.error("Folder upload failed", {
+        description: error instanceof Error ? error.message : "Unknown error",
+      });
+    } finally {
+      setFolderLoading(false);
+      if (folderInputRef.current) {
+        folderInputRef.current.value = "";
+      }
+    }
+  };
+
+  const handleFolderUpload = async () => {
+    if (!folderPath.trim()) return;
+
+    setFolderLoading(true);
+    setShowFolderDialog(false);
+    trackStartProcess({
+      processType: "Ingestion",
+      process: "Document Upload",
+      category: "Knowledge",
+      source: "path",
+    });
+
+    try {
+      const response = await fetch("/api/upload_path", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ path: folderPath }),
+      });
+
+      const result = await response.json();
+
+      if (response.status === 201) {
+        const taskId = result.task_id || result.id;
+
+        if (!taskId) {
+          throw new Error("No task ID received from server");
+        }
+
+        addTask(taskId, { source: "path" });
+        setFolderPath("");
+        // Refetch tasks to show the new task
+        refetchTasks();
+      } else if (response.ok) {
+        setFolderPath("");
+        // Refetch tasks even for direct uploads in case tasks were created
+        refetchTasks();
+      } else {
+        console.error("Folder upload failed:", result.error);
+        if (response.status === 400) {
+          toast.error("Upload failed", {
+            description: result.error || "Bad request",
+          });
+        }
+      }
+    } catch (error) {
+      trackProcessFailure({
+        processType: "Ingestion",
+        process: "Document Upload",
+        category: "Knowledge",
+        source: "path",
+        resultValue: error instanceof Error ? error.message : "Unknown error",
+      });
+      console.error("Folder upload error:", error);
+    } finally {
+      setFolderLoading(false);
+    }
+  };
+
+  const cloudConnectorItems = Object.entries(cloudConnectors)
+    .filter(([type, info]) => {
+      if (!info.available) return false;
+      if (isCloudBrand && type === "onedrive") return false;
+      return true;
+    })
+    .map(([type, info]) => {
+      const descriptor = getConnectorDescriptor(type);
+      return {
+        label: info.name,
+        icon: descriptor?.Icon ?? PlugZap,
+        onClick: async () => {
+          trackButton({
+            CTA: `Select Connector - ${info.name}`,
+            elementId: "cloud-connector-menu-item",
+            namespace: "knowledge",
+            payload: { connector_type: type },
+          });
+          if (info.connected && info.hasToken) {
+            setIsNavigatingToCloud(true);
+            try {
+              router.push(`/upload/${type}`);
+              setTimeout(() => setIsNavigatingToCloud(false), 1000);
+            } catch {
+              setIsNavigatingToCloud(false);
+            }
+          } else {
+            router.push("/settings");
+          }
+        },
+        disabled: !info.connected || !info.hasToken,
+      };
+    });
+
+  // Gate each bucket connector on its backend availability (IBM auth, or the
+  // OPENRAG_DEV_AZURE_BLOB dev flag for Azure Blob) AND a saved connection,
+  // rather than the global IBM-auth flag — this keeps S3/IBM COS hidden outside
+  // IBM auth while letting Azure Blob appear in local dev once configured.
+  const bucketConnectorItems = getConnectorDescriptors()
+    .filter(
+      (d) =>
+        d.kind === "bucket" &&
+        d.menuItem &&
+        bucketConnectorAvailable[d.connectorType] &&
+        bucketConnectorConfigured[d.connectorType],
+    )
+    .map((d) => ({
+      label: d.menuItem!.label,
+      icon: d.Icon,
+      onClick: () => router.push(d.menuItem!.route),
+    }));
+
+  const menuItems = [
+    {
+      label: "File",
+      icon: FileIconWithColor,
+      onClick: handleFileUpload,
+    },
+    {
+      label: "Folder",
+      icon: FolderIconWithColor,
+      onClick: () => folderInputRef.current?.click(),
+    },
+    ...bucketConnectorItems,
+    ...cloudConnectorItems,
+  ];
+
+  // Comprehensive loading state
+  const isLoading = fileUploading || folderLoading || isNavigatingToCloud;
+
+  if (!mounted) {
+    return (
+      <div className="flex h-12 pointer-events-none">
+        <Button
+          variant="outline"
+          className="h-12 px-6 rounded-l-lg rounded-r-none border-r-0 text-[var(--icon-disabled)] cursor-not-allowed"
+        >
+          <span>Add {isCloudBrand ? `knowledge` : `Knowledge`}</span>
+        </Button>
+        <Button
+          variant="outline"
+          className="h-12 w-12 flex-shrink-0 rounded-r-lg rounded-l-none border-l border-border text-[var(--icon-disabled)] cursor-not-allowed"
+          aria-label="Open add knowledge menu"
+        >
+          <ChevronDown className="h-5 w-5" />
+        </Button>
+      </div>
+    );
+  }
+
+  if (!canUpload) {
+    // Viewer / restricted users see no entry point at all.
+    return null;
+  }
+
+  return (
+    <>
+      <DropdownMenu onOpenChange={setIsMenuOpen}>
+        <DropdownMenuTrigger asChild>
+          {isCloudBrand ? (
+            <div className="flex h-12">
+              <Button
+                type="button"
+                disabled={isLoading}
+                className="h-12 bg-blue-600 px-6 text-body-compact text-primary-foreground hover:bg-blue-700"
+              >
+                {isLoading && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+                <span>
+                  {isLoading
+                    ? fileUploading
+                      ? "Uploading..."
+                      : folderLoading
+                        ? "Processing Folder..."
+                        : isNavigatingToCloud
+                          ? "Loading..."
+                          : "Processing..."
+                    : "Add Contract"}
+                </span>
+              </Button>
+              <Button
+                type="button"
+                variant="default"
+                size="icon"
+                disabled={isLoading}
+                className="h-12 w-12 flex-shrink-0 border-l border-placeholder bg-blue-600 text-primary-foreground hover:bg-blue-700"
+                aria-label="Open add knowledge menu"
+              >
+                {!isLoading && (
+                  <ChevronDown
+                    className={cn(
+                      "h-5 w-5 transition-transform duration-200",
+                      isMenuOpen && "rotate-180",
+                    )}
+                  />
+                )}
+              </Button>
+            </div>
+          ) : (
+            <Button disabled={isLoading} variant="outline">
+              {isLoading && <Loader2 className="h-4 w-4 animate-spin" />}
+              <span>
+                {isLoading
+                  ? fileUploading
+                    ? "Uploading..."
+                    : folderLoading
+                      ? "Processing Folder..."
+                      : isNavigatingToCloud
+                        ? "Loading..."
+                        : "Processing..."
+                  : "Add Contract"}
+              </span>
+              {!isLoading && (
+                <ChevronDown
+                  className={cn(
+                    "h-4 w-4 transition-transform duration-200",
+                    isMenuOpen && "rotate-180",
+                  )}
+                />
+              )}
+            </Button>
+          )}
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-56">
+          {menuItems.map((item, index) => (
+            <DropdownMenuItem
+              key={`${item.label}-${index}`}
+              onClick={item.onClick}
+              disabled={"disabled" in item ? item.disabled : false}
+            >
+              <item.icon className="mr-2 h-4 w-4" />
+              {item.label}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        onChange={handleFileChange}
+        className="hidden"
+        accept={supportedExtensions.join(",")}
+      />
+
+      <input
+        ref={folderInputRef}
+        type="file"
+        // @ts-ignore - webkitdirectory is not in TypeScript types but is widely supported
+        webkitdirectory=""
+        multiple
+        onChange={handleFolderSelect}
+        className="hidden"
+      />
+
+      {/* Process Folder Dialog */}
+      <Dialog open={showFolderDialog} onOpenChange={setShowFolderDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <FolderOpen className="h-5 w-5" />
+              Process Folder
+            </DialogTitle>
+            <DialogDescription>
+              Process all documents in a folder path
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="folder-path">Folder Path</Label>
+              <Input
+                id="folder-path"
+                type="text"
+                placeholder="/path/to/documents"
+                value={folderPath}
+                onChange={(e) => setFolderPath(e.target.value)}
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="outline"
+                onClick={() => setShowFolderDialog(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleFolderUpload}
+                disabled={!folderPath.trim() || folderLoading}
+              >
+                {folderLoading ? "Processing..." : "Process Folder"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Duplicate Handling Dialog */}
+      <DuplicateHandlingDialog
+        open={showDuplicateDialog}
+        onOpenChange={handleDuplicateDialogOpenChange}
+        onOverwrite={handleOverwriteFile}
+        isLoading={fileUploading || folderLoading}
+        duplicateLabel={duplicateFilename}
+        duplicateNames={pendingFolderUpload?.duplicateNames}
+      />
+
+      <IngestReviewDialog
+        open={preview.open}
+        onOpenChange={(open) =>
+          setPreview((prev) => (open ? { ...prev, open } : EMPTY_PREVIEW))
+        }
+        taskIds={preview.taskIds}
+        previewFiles={preview.files}
+      />
+    </>
+  );
+}
