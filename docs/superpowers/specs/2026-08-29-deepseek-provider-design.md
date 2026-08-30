@@ -105,13 +105,20 @@ Vision-Modell dient nur dem VLM-Slot).
 | # | Datei | Änderung |
 |---|---|---|
 | 1 | `frontend/app/settings/_helpers/model-helpers.tsx` | `ModelProvider`-Union += `"deepseek"`; `ALL_PROVIDERS` += deepseek; **`LLM_PROVIDER_ORDER`** += deepseek (**`EMBEDDING_PROVIDER_ORDER` bleibt**); `getModelLogo()`-Branch; `getFallbackModels("deepseek")` → `["deepseek-v4-flash", "deepseek-v4-pro"]` |
-| 2 | `frontend/app/settings/_components/model-providers.tsx` | `modelProvidersMap`-Eintrag (Name "DeepSeek", Logo, Farben); `DeepSeekSettingsDialog` (Key-Feld) |
+| 2 | `frontend/app/settings/_components/model-providers.tsx` | `modelProvidersMap`-Eintrag: `{ name: "DeepSeek", logo: DeepSeekLogo, logoColor: "text-white", logoBgColor: "bg-[#4D6BFE]" }` (DeepSeek-Brandblau, analog watsonx-Muster); `DeepSeekSettingsDialog` (Key-Feld) |
 | 3 | `frontend/app/settings/_components/deepseek-settings-{dialog,form}.tsx` | **Neu** — nach OpenAI-Vorlage (nur `api_key`) |
 | 4 | `frontend/app/onboarding/_components/onboarding-card.tsx` | **Nur LLM-Tab**: neuer Tab `value="deepseek"` + TabsContent + Credential-Mapping (`deepseek_api_key`) + Payload-Feld; Auto-Select-Loop über `LLM_PROVIDER_ORDER` berücksichtigt deepseek automatisch (**Embedding-Tab unverändert**) |
 | 5 | `frontend/components/provider-health-banner.tsx` | `providerTitleMap` += `deepseek: "DeepSeek"` |
 | 6 | `frontend/app/api/queries/useProviderHealthQuery.ts` | Union += `"deepseek"` |
-| 7 | `frontend/components/icons/deepseek-logo.tsx` | **Neu** — Icon |
+| 7 | `frontend/components/icons/deepseek-logo.tsx` | **Neu** — 16×16-SVG-Komponente im Stil der anderen Provider-Icons (`fill="currentColor"`, `<title>DeepSeek Logo</title>`): minimaler Wal als Pfad (DeepSeek-Markenzeichen, stilisierte Eigenzeichnung — kein externes Asset) |
 | 8 | `frontend/app/settings/_components/ingest-settings-section.tsx` | **VLM-Provider-Dropdown** (L97–127) += deepseek + `useGetModelsQuery("deepseek")` (**Embedding-Gruppen unverändert**) |
+
+**Visuelle Abdeckung:** Alle übrigen UI-Elemente sind **generisch** und brauchen
+kein neues Design — die Provider-Karte (`ModelProviderCard`), die Onboarding-Tabs
+und der Health-Banner rendern automatisch aus den Maps/Unions oben. Einzige neue
+visuelle Artefakte: das DeepSeek-Logo (Nr. 7) und die Farb-Konfiguration (Nr. 2).
+Brandfarbe: DeepSeek-Blau `#4D6BFE`. Bei der Umsetzung der neuen Komponenten den
+`frontend-design`-Skill nutzen (Konsistenz mit den bestehenden Settings-Dialogen).
 
 ## 6. Test-Änderungen
 
