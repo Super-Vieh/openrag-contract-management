@@ -75,6 +75,7 @@ export const useListFiles = (
         connector_type: (f.connector_type as string) || "local",
         embedding_model: f.embedding_model as string | undefined,
         embedding_dimensions: f.embedding_dimensions as number | undefined,
+        metadata: f.metadata as Record<string, unknown> | undefined,
         allowed_users: (f.allowed_users as string[]) || [],
         allowed_groups: (f.allowed_groups as string[]) || [],
         status: "active" as const,

@@ -33,7 +33,7 @@ export function ContractSearchInput({
   value,
   onSearch,
   onClear,
-  placeholder = "Search your Contacts...",
+  placeholder = "Search your Contracts...",
   hideFilterChip = false,
   hideSubmit = false,
   className,

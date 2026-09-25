@@ -330,6 +330,7 @@ class FileServiceV2:
                                     "embedding_model",
                                     "embedding_dimensions",
                                     "indexed_time",
+                                    "metadata",  # User-supplied document metadata
                                     "allowed_users",
                                     "allowed_groups",
                                     "allowed_principal_labels",
@@ -384,6 +385,7 @@ class FileServiceV2:
                                     "embedding_model",
                                     "embedding_dimensions",
                                     "indexed_time",
+                                    "metadata",  # User-supplied document metadata
                                     "allowed_users",
                                     "allowed_groups",
                                     "allowed_principal_labels",
@@ -470,6 +472,8 @@ class FileServiceV2:
                     "embedding_dimensions": source.get("embedding_dimensions"),
                     "indexed_time": source.get("indexed_time", ""),
                     "chunk_count": bucket.get("chunk_count", {}).get("value", 0),
+                    # User-supplied metadata (empty dict when none was given)
+                    "metadata": source.get("metadata", {}),
                     "allowed_users": source.get("allowed_users", []),
                     "allowed_groups": source.get("allowed_groups", []),
                     "allowed_principal_labels": source.get("allowed_principal_labels", []),

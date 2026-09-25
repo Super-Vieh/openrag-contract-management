@@ -4,6 +4,7 @@ import { ArrowLeft, Loader2, Search } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense } from "react";
 import { useFileScopedChunksQuery } from "@/app/api/queries/useFileScopedChunksQuery";
+import { DocumentMetadataPanel } from "@/components/document-metadata-panel";
 import { FileChunksPanel } from "@/components/file-chunks-panel";
 import { ProtectedRoute } from "@/components/protected-route";
 import { Button } from "@/components/ui/button";
@@ -27,7 +28,7 @@ function ChunksPageContent() {
           <Search className="h-12 w-12 mx-auto mb-4 text-muted-foreground/50" />
           <p className="text-lg text-muted-foreground">No file specified</p>
           <p className="text-sm text-muted-foreground/70 mt-2">
-            Please select a file from the knowledge page
+            Please select a file from the vertragsmanagement page
           </p>
         </div>
       </div>
@@ -36,6 +37,8 @@ function ChunksPageContent() {
 
   const chunks = fileData?.chunks ?? [];
   const chunkCount = chunks.length;
+  // Every chunk of a file carries the same document-level metadata.
+  const metadata = chunks[0]?.metadata;
   const averageChunkLength =
     chunkCount === 0
       ? 0
@@ -52,7 +55,7 @@ function ChunksPageContent() {
         <div className="flex items-center gap-3 mb-6">
           <Button
             variant="ghost"
-            onClick={() => router.push("/knowledge")}
+            onClick={() => router.push("/vertragsmanagement")}
             size="sm"
             className="max-w-8 max-h-8 -m-2"
           >
@@ -66,6 +69,7 @@ function ChunksPageContent() {
 
       <div className="grid gap-6 grid-cols-1 lg:grid-cols-[3fr_1fr]">
         <div className="row-start-2 lg:row-start-1">
+          <DocumentMetadataPanel metadata={metadata} />
           <FileChunksPanel filename={filename} />
         </div>
 

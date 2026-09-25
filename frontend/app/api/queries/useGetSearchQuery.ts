@@ -36,6 +36,8 @@ export interface ChunkResult {
   parser?: string;
   chunk_size?: number;
   chunk_overlap?: number;
+  /** User-supplied document metadata from ingest (empty object when none was given). */
+  metadata?: Record<string, unknown>;
   chunk_id?: string;
   id?: string;
   index?: number;
@@ -65,6 +67,8 @@ export interface File {
     | "sync";
   error?: string;
   chunks?: ChunkResult[];
+  /** User-supplied document metadata from ingest (empty object when none was given). */
+  metadata?: Record<string, unknown>;
   allowed_users?: string[];
   allowed_groups?: string[];
 }

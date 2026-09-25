@@ -519,6 +519,7 @@ class SearchService:
                 "parser",
                 "chunk_size",
                 "chunk_overlap",
+                "metadata",  # User-supplied document metadata (may be empty)
                 "allowed_users",
                 "allowed_groups",
                 "allowed_principal_labels",
@@ -651,6 +652,8 @@ class SearchService:
                     "parser": source.get("parser"),
                     "chunk_size": source.get("chunk_size"),
                     "chunk_overlap": source.get("chunk_overlap"),
+                    # User-supplied document metadata (empty when none was given)
+                    "metadata": source.get("metadata", {}),
                     "chunk_id": hit.get("_id"),
                     "id": hit.get("_id"),
                     # ACL fields (may be missing for some documents)

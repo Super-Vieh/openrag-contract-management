@@ -6,6 +6,7 @@ import {
   type ColDef,
   type ColumnState,
   type GetRowIdParams,
+  type IRowNode,
   themeQuartz,
   type ValueFormatterParams,
   type ValueGetterParams,
@@ -45,6 +46,11 @@ import {
 } from "@/components/ui/tooltip";
 import { useIsCloudBrand } from "@/contexts/brand-context";
 import { getConnectorDescriptor } from "@/lib/connectors/registry";
+import {
+  extractParameter,
+  extractParameterValue,
+  translateMetadataValue,
+} from "@/lib/contract-metadata";
 import { formatFileSize } from "@/lib/file-format";
 import { buildSearchPayloadFilters } from "@/lib/filter-normalization";
 import {
@@ -133,13 +139,46 @@ function getSourceIcon(connectorType?: string) {
 const AG_FIELD_TO_SORT_BY: Record<string, string> = {
   filename: "filename",
   size: "file_size",
-  mimetype: "mimetype",
-  owner: "owner",
-  chunkCount: "chunk_count",
-  embedding_model: "embedding_model",
-  embedding_dimensions: "embedding_dimensions",
   status: "status",
 };
+
+/** Contract metadata is free-form; read it without repeating the cast everywhere. */
+function metadataOf(file?: File): Record<string, unknown> {
+  return (file?.metadata ?? {}) as Record<string, unknown>;
+}
+
+/** Missing or non-array counts as none. */
+function listLength(value: unknown): number {
+  return Array.isArray(value) ? value.length : 0;
+}
+
+/** Sort rank for the tri-state Extraction column: yes > no > unknown. */
+function extractionRank(value: unknown): number {
+  if (value === true) return 1;
+  if (value === false) return 0;
+  return -1;
+}
+
+/** Compare two optional numbers; missing values sort first. */
+function compareOptionalNumbers(a: number | null, b: number | null): number {
+  if (a === null && b === null) return 0;
+  if (a === null) return -1;
+  if (b === null) return 1;
+  return a - b;
+}
+
+/**
+ * Columns whose values live only in document metadata, never as OpenSearch
+ * fields. They sort client-side (see each column's `comparator`) — asking the
+ * backend to sort by them would silently fall back to filename.
+ */
+const CLIENT_SORT_COLUMNS = new Set([
+  "warnings",
+  "errors",
+  "extraktion_korrekt",
+  "validierungsstatus",
+  "gesamtwert",
+]);
 
 function SearchPage() {
   const isCloudBrand = useIsCloudBrand();
@@ -418,10 +457,6 @@ function SearchPage() {
     [effectiveData],
   );
 
-  const getOwnerLabel = useCallback((file?: File): string => {
-    return file?.owner_name?.trim() || file?.owner_email?.trim() || "—";
-  }, []);
-
   const getStatusSortRank = useCallback((status?: File["status"]): number => {
     switch (status) {
       case "active":
@@ -526,6 +561,11 @@ function SearchPage() {
       .getColumnState()
       .find((col) => col.sort != null);
 
+    // Metadata columns sort client-side (see each column's comparator).
+    // Refetching here would only reset paging and re-sort by the server-side
+    // fallback field — the client-side order would be replaced a moment later.
+    if (sortedCol && CLIENT_SORT_COLUMNS.has(sortedCol.colId)) return;
+
     const newSortBy = sortedCol
       ? (AG_FIELD_TO_SORT_BY[sortedCol.colId] ?? sortedCol.colId)
       : "filename";
@@ -598,7 +638,7 @@ function SearchPage() {
               onClick={() => {
                 if (!isActive) return;
                 router.push(
-                  `/knowledge/chunks?filename=${encodeURIComponent(
+                  `/vertragsmanagement/chunks?filename=${encodeURIComponent(
                     data?.filename ?? "",
                   )}`,
                 );
@@ -638,81 +678,118 @@ function SearchPage() {
       cellClass: isCloudBrand ? "text-muted-foreground" : undefined,
     },
     {
-      field: "mimetype",
-      headerName: "Type",
-      ...(isCloudBrand ? { flex: 1, minWidth: 110 } : {}),
-      cellClass: isCloudBrand ? "text-muted-foreground" : undefined,
-      sortable: true,
-    },
-    {
-      field: "owner",
-      headerName: "Owner",
-      ...(isCloudBrand ? { flex: 1.4, minWidth: 180 } : {}),
-      valueFormatter: (params: ValueFormatterParams<File>) =>
-        params.data?.owner_name || params.data?.owner_email || "—",
-      cellClass: isCloudBrand ? "text-muted-foreground" : undefined,
-      sortable: true,
-      valueGetter: (params: ValueGetterParams<File>) =>
-        getOwnerLabel(params.data),
-      comparator: () => 0,
-    },
-    {
-      field: "chunkCount",
-      headerName: "Chunks",
-      ...(isCloudBrand ? { flex: 0.9, minWidth: 95 } : {}),
-      sortable: true,
-      comparator: () => 0,
-      valueFormatter: (params: ValueFormatterParams<File>) =>
-        params.data?.chunkCount?.toString() || "-",
-      cellClass: isCloudBrand ? "text-muted-foreground" : undefined,
-    },
-    {
-      field: "avgScore",
-      headerName: "Avg score",
+      colId: "warnings",
+      headerName: "Warnings",
       ...(isCloudBrand ? { flex: 1, minWidth: 120 } : {}),
       sortable: true,
+      valueGetter: (params: ValueGetterParams<File>) =>
+        listLength(metadataOf(params.data).warnings),
       comparator: (valueA?: number, valueB?: number) =>
-        (valueA || 0) - (valueB || 0),
+        (valueA ?? 0) - (valueB ?? 0),
       cellRenderer: ({ value }: CustomCellRendererProps<File>) => {
-        if (isCloudBrand) {
-          return (
-            <span className="text-muted-foreground">
-              {typeof value === "number" ? value.toFixed(2) : "-"}
-            </span>
-          );
-        }
+        const count = typeof value === "number" ? value : 0;
         return (
-          <span className="text-xs text-accent-emerald-foreground bg-accent-emerald px-2 py-1 rounded">
-            {value?.toFixed(2) ?? "-"}
-          </span>
+          <div
+            className={cn(
+              "inline-flex items-center gap-1",
+              count > 0
+                ? "text-accent-amber-foreground"
+                : "text-accent-emerald-foreground",
+            )}
+          >
+            {count > 0 ? `${count}` : "None"}
+          </div>
         );
       },
     },
     {
-      field: "embedding_model",
-      headerName: "Embedding model",
-      ...(isCloudBrand ? { flex: 1.4 } : {}),
+      colId: "errors",
+      headerName: "Errors",
+      ...(isCloudBrand ? { flex: 1, minWidth: 110 } : {}),
       sortable: true,
-      minWidth: 200,
-      cellRenderer: ({ data }: CustomCellRendererProps<File>) => (
-        <span className="text-xs text-muted-foreground">
-          {data?.embedding_model || "—"}
-        </span>
-      ),
+      valueGetter: (params: ValueGetterParams<File>) =>
+        listLength(metadataOf(params.data).errors),
+      comparator: (valueA?: number, valueB?: number) =>
+        (valueA ?? 0) - (valueB ?? 0),
+      cellRenderer: ({ value }: CustomCellRendererProps<File>) => {
+        const count = typeof value === "number" ? value : 0;
+        return (
+          <div
+            className={cn(
+              "inline-flex items-center gap-1",
+              count > 0
+                ? "text-accent-red-foreground"
+                : "text-accent-emerald-foreground",
+            )}
+          >
+            {count > 0 ? `${count}` : "None"}
+          </div>
+        );
+      },
     },
     {
-      field: "embedding_dimensions",
-      headerName: "Dimensions",
-      ...(isCloudBrand ? { flex: 0.9, minWidth: 110 } : { width: 110 }),
+      colId: "extraktion_korrekt",
+      headerName: "Extraction",
+      ...(isCloudBrand ? { flex: 1, minWidth: 130 } : {}),
       sortable: true,
-      comparator: () => 0,
-      cellRenderer: ({ data }: CustomCellRendererProps<File>) => (
-        <span className="text-xs text-muted-foreground">
-          {typeof data?.embedding_dimensions === "number"
-            ? data.embedding_dimensions.toString()
-            : "—"}
-        </span>
-      ),
+      valueGetter: (params: ValueGetterParams<File>) =>
+        metadataOf(params.data).extraktion_korrekt,
+      comparator: (valueA?: unknown, valueB?: unknown) =>
+        extractionRank(valueA) - extractionRank(valueB),
+      cellRenderer: ({ value }: CustomCellRendererProps<File>) => {
+        if (typeof value !== "boolean") return null;
+        return (
+          <div
+            className={cn(
+              "inline-flex items-center gap-1",
+              value
+                ? "text-accent-emerald-foreground"
+                : "text-accent-red-foreground",
+            )}
+          >
+            {value ? "yes" : "no"}
+          </div>
+        );
+      },
+    },
+    {
+      colId: "validierungsstatus",
+      headerName: "Validation",
+      ...(isCloudBrand ? { flex: 1.6, minWidth: 200 } : {}),
+      sortable: true,
+      valueGetter: (params: ValueGetterParams<File>) => {
+        const status = metadataOf(params.data).status;
+        if (typeof status !== "string" || !status) return null;
+        return translateMetadataValue(status);
+      },
+      comparator: (valueA?: unknown, valueB?: unknown) =>
+        String(valueA ?? "").localeCompare(String(valueB ?? ""), "de"),
+      cellRenderer: ({ value }: CustomCellRendererProps<File>) =>
+        typeof value === "string" && value ? (
+          <span className="truncate">{value}</span>
+        ) : null,
+    },
+    {
+      colId: "gesamtwert",
+      headerName: "Total value",
+      ...(isCloudBrand ? { flex: 1.2, minWidth: 150 } : {}),
+      sortable: true,
+      valueGetter: (params: ValueGetterParams<File>) =>
+        extractParameter(metadataOf(params.data), "gesamtwert"),
+      comparator: (
+        _valueA,
+        _valueB,
+        nodeA: IRowNode<File>,
+        nodeB: IRowNode<File>,
+      ) =>
+        compareOptionalNumbers(
+          extractParameterValue(nodeA.data?.metadata, "gesamtwert"),
+          extractParameterValue(nodeB.data?.metadata, "gesamtwert"),
+        ),
+      cellRenderer: ({ value }: CustomCellRendererProps<File>) =>
+        typeof value === "string" && value ? (
+          <span className="truncate">{value}</span>
+        ) : null,
     },
     {
       field: "status",
@@ -916,7 +993,7 @@ function SearchPage() {
               isCloudBrand && "ibm-section-title",
             )}
           >
-            Project knowledge
+            Documents
           </h2>
         </div>
         {isCloudBrand ? (
