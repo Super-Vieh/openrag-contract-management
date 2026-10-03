@@ -1050,7 +1050,7 @@ function SearchPage() {
               ) : (
                 <>
                   <RefreshCw className="h-4 w-4 mr-2" />
-                  Sync
+                  Refresh
                 </>
               )}
             </Button>

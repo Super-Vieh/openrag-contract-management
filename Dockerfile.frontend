@@ -10,10 +10,10 @@ USER 0
 
 COPY frontend/package.json frontend/package-lock.json ./
 # Copy local stub packages referenced via file: in package.json (e.g. sharp stub
-# that keeps LGPL libvips binaries out of the tree). npm ci needs these present.
+# that keeps LGPL libvips binaries out of the tree). The install step needs these present.
 COPY frontend/stubs ./stubs
 
-RUN npm ci --prefer-offline --no-audit
+RUN npm install --prefer-offline --no-audit
 
 # -----------------------------------------------------------------------------
 # Stage: builder

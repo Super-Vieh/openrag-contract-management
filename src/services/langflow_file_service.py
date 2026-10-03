@@ -394,10 +394,35 @@ class LangflowFileService:
             )
         resp.raise_for_status()
 
+    async def delete_duplicate_user_file(self, file_name: str) -> str | None:
+        """Delete one stored file stored under ``file_name``.
+
+        Langflow addresses files by id, so the name is resolved through the v2
+        listing first. The listing's ``name`` field has the extension stripped;
+        ``path`` carries the filename as shown in the Langflow UI, so compare
+        its basename against ``file_name``.
+
+        Returns the deleted file id, or ``None`` when nothing matched.
+        """
+        resp = await clients.langflow_request("GET", "/api/v2/files")
+
+        for entry in resp.json():
+            if Path(str(entry.get("path", ""))).name == file_name:
+                await self.delete_user_file(entry["id"])
+                logger.info(
+                    "[LF] Deleted duplicate file",
+                    name=file_name,
+                    file_id=entry["id"],
+                )
+                return entry["id"]
+
+        logger.debug("[LF] No stored duplicate to delete", name=file_name)
+        return None
+
     async def run_ingestion_flow(
         self,
         file_paths: list[str],
-        file_tuples: list[tuple[str, str, str]],
+        file_tuples: list[tuple[str, bytes, str]],
         jwt_token: str | None = None,
         session_id: str | None = None,
         tweaks: dict[str, Any] | None = None,
@@ -559,6 +584,22 @@ class LangflowFileService:
             filename=filename,
             mimetype=mimetype,
         )
+        try:
+            file_name = file_tuples[0][0]
+            delete_result = await self.delete_duplicate_user_file(file_name)
+            store_result = await self.upload_user_file(file_tuples[0], jwt_token=jwt_token)
+            logger.debug(
+                "[LF] File uploaded before ingestion",
+                file_id=store_result.get("id") if isinstance(store_result, dict) else None,
+                path=store_result.get("path") if isinstance(store_result, dict) else None,
+            )
+        except Exception as e:
+            logger.error(
+                "[LF] Failed to upload file before ingestion",
+                error=str(e),
+            )
+            raise
+
         try:
             resp = await clients.langflow_request(
                 "POST",
