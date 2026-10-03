@@ -9,6 +9,7 @@ from dependencies import (
     has_effective_permission,
     require_any_permission,
 )
+from services.langflow_file_service import LangflowFileService
 from session_manager import User
 from utils.logging_config import get_logger
 
@@ -160,6 +161,14 @@ async def delete_documents_by_filename_core(
                     "error": "No matching document chunks were deleted. The file may be missing or not deletable in the current user context.",
                 },
                 404,
+            )
+        try:
+            await LangflowFileService().delete_duplicate_user_file(normalized_filename)
+        except Exception as e:
+            logger.warning(
+                "Langflow storage cleanup failed",
+                filename=normalized_filename,
+                error=str(e),
             )
 
         return (

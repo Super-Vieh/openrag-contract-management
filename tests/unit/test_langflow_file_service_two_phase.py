@@ -318,3 +318,41 @@ async def test_docling_submit_failure_skips_polling_and_langflow(
     assert mock_polling_service.poll_until_ready.call_count == 0
     assert svc.run_ingestion_flow.call_count == 0
     assert file_task.docling_task_id is None
+
+
+@pytest.mark.asyncio
+async def test_empty_file_rejected_before_docling(
+    langflow_service, mock_docling_service, mock_polling_service, file_task
+):
+    """A zero-byte upload must never reach Docling (nor Langflow).
+
+    Docling reports SUCCESS for an empty file, so without this guard the run
+    proceeds to Langflow and only fails much later as a misleading
+    "corrupted or invalid" error - after the file was already stored.
+    """
+    with pytest.raises(Exception, match="empty or unreadable"):
+        await langflow_service.upload_and_ingest_file(
+            file_tuple=("empty.md", b"", "text/markdown"),
+            docling_polling_service=mock_polling_service,
+            file_task=file_task,
+        )
+
+    mock_docling_service.upload_to_docling_direct_async.assert_not_awaited()
+    assert mock_polling_service.poll_until_ready.call_count == 0
+    assert langflow_service.run_ingestion_flow.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_whitespace_only_file_rejected_before_docling(
+    langflow_service, mock_docling_service, mock_polling_service, file_task
+):
+    with pytest.raises(Exception, match="empty or unreadable"):
+        await langflow_service.upload_and_ingest_file(
+            file_tuple=("blank.md", b"\n\n   \t\n", "text/markdown"),
+            docling_polling_service=mock_polling_service,
+            file_task=file_task,
+        )
+
+    mock_docling_service.upload_to_docling_direct_async.assert_not_awaited()
+    assert mock_polling_service.poll_until_ready.call_count == 0
+    assert langflow_service.run_ingestion_flow.call_count == 0

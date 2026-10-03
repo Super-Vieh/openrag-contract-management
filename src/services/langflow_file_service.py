@@ -1074,6 +1074,13 @@ class LangflowFileService:
 
         filename, content, _ = file_tuple
 
+        # A zero-byte upload cannot yield text: Docling reports SUCCESS for an
+        # empty file, so without this guard the run proceeds all the way to
+        # Langflow and only fails much later as a misleading "corrupted or
+        # invalid" error - after the file was already stored.
+        if not content or not content.strip():
+            raise Exception("The file is empty or unreadable")
+
         ocr_override = settings.get("ocr") if isinstance(settings, dict) else None
         pic_desc_override = (
             settings.get("pictureDescriptions") if isinstance(settings, dict) else None
