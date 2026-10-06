@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import mimetypes
 import time
 import uuid
 from pathlib import Path
@@ -418,6 +419,65 @@ class LangflowFileService:
 
         logger.debug("[LF] No stored duplicate to delete", name=file_name)
         return None
+
+    async def download_user_file_by_name(self, file_name: str) -> tuple[str, bytes, str] | None:
+        """Fetch the stored original bytes for ``file_name``.
+
+        Returns ``(filename, content, content_type)`` - the same shape
+        ``upload_and_ingest_file`` expects - or ``None`` when no stored
+        file matches ``file_name``.
+
+        Two traps to avoid:
+          * Resolve the name like ``delete_duplicate_user_file`` does:
+            compare the ``path`` basename, not ``name`` (that one has the
+            extension stripped). The ingestion path renames ``.txt`` to
+            ``.md`` before storing, so match against
+            ``get_filename_aliases`` rather than the raw name.
+          * Use ``GET /api/v2/files/{id}`` *without* ``return_content``.
+            That parameter returns the payload decoded to text and would
+            silently corrupt binary documents. The store keeps no
+            mimetype, so the content type is guessed from the filename
+            extension.
+
+        An empty stored file also returns ``None``: a zero-byte payload is
+        never ingestable, and collapsing it into the same signal lets the
+        caller abort before it deletes the chunks it was going to replace.
+        """
+        from utils.file_utils import get_filename_aliases
+
+        aliases = set(get_filename_aliases(file_name))
+        if not aliases:
+            return None
+
+        listing = await clients.langflow_request("GET", "/api/v2/files")
+        entry = next(
+            (item for item in listing.json() if Path(str(item.get("path", ""))).name in aliases),
+            None,
+        )
+        if entry is None:
+            logger.debug("[LF] No stored file to download", name=file_name)
+            return None
+
+        resp = await clients.langflow_request("GET", f"/api/v2/files/{entry['id']}")
+        resp.raise_for_status()
+        content = resp.content
+
+        if not content:
+            logger.warning(
+                "[LF] Stored file is empty",
+                name=file_name,
+                file_id=entry["id"],
+            )
+            return None
+
+        content_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+        logger.info(
+            "[LF] Downloaded stored file",
+            name=file_name,
+            file_id=entry["id"],
+            size=len(content),
+        )
+        return (file_name, content, content_type)
 
     async def run_ingestion_flow(
         self,

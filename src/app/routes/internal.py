@@ -64,6 +64,12 @@ def register_internal_routes(app: FastAPI):
         tags=["internal"],
     )
     app.add_api_route(
+        "/langflow/update_ingest",
+        langflow_files.run_update_with_ingestion,
+        methods=["POST"],
+        tags=["internal"],
+    )
+    app.add_api_route(
         "/internal/ingest/chunks",
         langflow_ingest.ingest_langflow_chunks,
         methods=["POST"],

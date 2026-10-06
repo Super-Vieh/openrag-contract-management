@@ -1,8 +1,10 @@
 "use client";
 
-import { ArrowLeft, Loader2, Search } from "lucide-react";
+import { ArrowLeft, Loader2, RotateCw, Search } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense } from "react";
+import { toast } from "sonner";
+import { useUpdateDocument } from "@/app/api/mutations/useUpdateDocument";
 import { useFileScopedChunksQuery } from "@/app/api/queries/useFileScopedChunksQuery";
 import { DocumentMetadataPanel } from "@/components/document-metadata-panel";
 import { FileChunksPanel } from "@/components/file-chunks-panel";
@@ -20,6 +22,7 @@ function ChunksPageContent() {
   const searchParams = useSearchParams();
   const filename = searchParams.get("filename");
   const { file: fileData } = useFileScopedChunksQuery(filename);
+  const updateDocumentMutation = useUpdateDocument();
 
   if (!filename) {
     return (
@@ -52,15 +55,42 @@ function ChunksPageContent() {
   return (
     <div className="flex flex-col h-full">
       <div className="flex flex-col mb-6">
-        <div className="flex items-center gap-3 mb-6">
-          <Button
-            variant="ghost"
-            onClick={() => router.push("/vertragsmanagement")}
-            size="sm"
-            className="max-w-8 max-h-8 -m-2"
-          >
-            <ArrowLeft size={24} />
-          </Button>
+        <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3 mb-6">
+          <div className="flex items-center gap-3">
+            <Button
+              variant="ghost"
+              onClick={() => router.push("/vertragsmanagement")}
+              size="sm"
+              className="max-w-8 max-h-8 -m-2"
+            >
+              <ArrowLeft size={24} />
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={updateDocumentMutation.isPending}
+              onClick={async () => {
+                try {
+                  const result = await updateDocumentMutation.mutateAsync({
+                    filename,
+                  });
+                  toast.success(result.message);
+                } catch (error) {
+                  toast.error(
+                    error instanceof Error
+                      ? error.message
+                      : "Failed to update document",
+                  );
+                }
+              }}
+            >
+              <RotateCw
+                className={`h-4 w-4 mr-2 ${updateDocumentMutation.isPending ? "animate-spin" : ""}`}
+              />
+              {updateDocumentMutation.isPending ? "Updating..." : "Update"}
+            </Button>
+          </div>
           <h1 className="text-lg font-semibold">
             {filename.replace(/\.[^/.]+$/, "")}
           </h1>

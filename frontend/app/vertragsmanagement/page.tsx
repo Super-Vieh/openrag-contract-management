@@ -63,14 +63,9 @@ import {
   DeleteConfirmationDialog,
   formatFilesToDelete,
 } from "../../components/delete-confirmation-dialog";
-import { SyncConfirmDialog } from "../../components/sync-confirm-dialog";
 import { useDeleteDocument } from "../api/mutations/useDeleteDocument";
 import { useRefreshOpenragDocs } from "../api/mutations/useRefreshOpenragDocs";
-import {
-  type SyncAllPreviewResponse,
-  useSyncAllConnectors,
-  useSyncAllConnectorsPreview,
-} from "../api/mutations/useSyncConnector";
+import { useUpdateDocument } from "../api/mutations/useUpdateDocument";
 
 function sameFileSelection(a: File[], b: File[]): boolean {
   if (a.length !== b.length) {
@@ -210,18 +205,14 @@ function SearchPage() {
     return () => setSelectedSources([]);
   }, [selectedRows, setSelectedSources]);
   const [showBulkDeleteDialog, setShowBulkDeleteDialog] = useState(false);
+  const [showBulkUpdateDialog, setShowBulkUpdateDialog] = useState(false);
   const lastErrorRef = useRef<string | null>(null);
   const hasInitializedFailedFilesRef = useRef(false);
   const seenFailedFileKeysRef = useRef<Set<string>>(new Set());
 
   const deleteDocumentMutation = useDeleteDocument();
-  const syncAllConnectorsMutation = useSyncAllConnectors();
-  const syncAllPreviewMutation = useSyncAllConnectorsPreview();
+  const updateDocumentMutation = useUpdateDocument();
   const refreshOpenragDocsMutation = useRefreshOpenragDocs();
-  const [syncDialogOpen, setSyncDialogOpen] = useState(false);
-  const [syncPreview, setSyncPreview] = useState<SyncAllPreviewResponse | null>(
-    null,
-  );
 
   const [currentPage, setCurrentPage] = useState(1);
   const [currentPageSize, setCurrentPageSize] = useState(25);
@@ -232,45 +223,6 @@ function SearchPage() {
   if (!cursorCacheRef.current) {
     cursorCacheRef.current = new Map();
   }
-
-  const handleOpenSyncDialog = useCallback(async () => {
-    setSyncPreview(null);
-    setSyncDialogOpen(true);
-    try {
-      const preview = await syncAllPreviewMutation.mutateAsync();
-      setSyncPreview(preview);
-    } catch (error) {
-      setSyncDialogOpen(false);
-      toast.error(
-        error instanceof Error ? error.message : "Failed to preview sync",
-      );
-    }
-  }, [syncAllPreviewMutation]);
-
-  const handleConfirmSync = useCallback(async () => {
-    try {
-      const result = await syncAllConnectorsMutation.mutateAsync();
-      if (result.status === "no_files") {
-        toast.info(
-          result.message ||
-            "No cloud files to sync. Add files from cloud connectors first.",
-        );
-      } else if (
-        result.synced_connectors &&
-        result.synced_connectors.length > 0
-      ) {
-        toast.success(
-          `Sync started for ${result.synced_connectors.join(", ")}. Check task notifications for progress.`,
-        );
-      } else if (result.errors && result.errors.length > 0) {
-        toast.error("Some connectors failed to sync");
-      }
-    } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Failed to sync connectors",
-      );
-    }
-  }, [syncAllConnectorsMutation]);
 
   useEffect(() => {
     refreshTasks();
@@ -983,6 +935,52 @@ function SearchPage() {
     }
   };
 
+  const handleBulkUpdate = async () => {
+    const rowsToUpdate = selectedRows.filter(isDeletableKnowledgeRow);
+    if (rowsToUpdate.length === 0) {
+      setShowBulkUpdateDialog(false);
+      return;
+    }
+
+    // Re-ingest is a background task per file, so fan out into N single
+    // requests the same way handleBulkDelete does.
+    const results = await Promise.allSettled(
+      rowsToUpdate.map((row) =>
+        updateDocumentMutation.mutateAsync({
+          filename: resolveDeleteFilename(row),
+        }),
+      ),
+    );
+
+    await refreshTasks();
+
+    const started = results.filter((result) => result.status === "fulfilled");
+    const failed = results.filter(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+
+    if (started.length > 0) {
+      toast.success(
+        `Update started for ${started.length} document${started.length > 1 ? "s" : ""}. Check task notifications for progress.`,
+      );
+    }
+    if (failed.length > 0) {
+      toast.error(
+        `${failed.length} document${failed.length > 1 ? "s" : ""} could not be updated`,
+        {
+          description:
+            failed[0].reason instanceof Error
+              ? failed[0].reason.message
+              : undefined,
+        },
+      );
+    }
+
+    setSelectedRows([]);
+    getGridApi()?.deselectAll();
+    setShowBulkUpdateDialog(false);
+  };
+
   return (
     <>
       <div className="flex flex-col h-full">
@@ -1031,29 +1029,6 @@ function SearchPage() {
           <div className="flex items-center flex-shrink-0 flex-wrap-reverse gap-3 mb-6">
             <ContractSearchInput />
 
-            <Button
-              type="button"
-              variant="outline"
-              className="rounded-lg flex-shrink-0"
-              disabled={
-                syncAllConnectorsMutation.isPending ||
-                syncAllPreviewMutation.isPending
-              }
-              onClick={handleOpenSyncDialog}
-            >
-              {syncAllConnectorsMutation.isPending ||
-              syncAllPreviewMutation.isPending ? (
-                <>
-                  <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
-                  Syncing...
-                </>
-              ) : (
-                <>
-                  <RefreshCw className="h-4 w-4 mr-2" />
-                  Refresh
-                </>
-              )}
-            </Button>
             <RequirePermission perm="config:write">
               <Button
                 type="button"
@@ -1088,14 +1063,25 @@ function SearchPage() {
               </Button>
             </RequirePermission>
             {selectedRows.length > 0 && (
-              <Button
-                type="button"
-                variant="destructive"
-                className="rounded-lg flex-shrink-0"
-                onClick={() => setShowBulkDeleteDialog(true)}
-              >
-                Delete
-              </Button>
+              <>
+                <Button
+                  type="button"
+                  variant="destructive"
+                  className="rounded-lg flex-shrink-0"
+                  disabled={updateDocumentMutation.isPending}
+                  onClick={() => setShowBulkUpdateDialog(true)}
+                >
+                  {updateDocumentMutation.isPending ? "Updating..." : "Update"}
+                </Button>
+                <Button
+                  type="button"
+                  variant="destructive"
+                  className="rounded-lg flex-shrink-0"
+                  onClick={() => setShowBulkDeleteDialog(true)}
+                >
+                  Delete
+                </Button>
+              </>
             )}
             <div className="ml-auto">
               <ContractDropdown />
@@ -1239,17 +1225,23 @@ function SearchPage() {
         {formatFilesToDelete(selectedRows)}
       </DeleteConfirmationDialog>
 
-      <SyncConfirmDialog
-        open={syncDialogOpen}
-        onOpenChange={setSyncDialogOpen}
-        onConfirm={handleConfirmSync}
-        isLoading={syncAllPreviewMutation.isPending || syncPreview === null}
-        isSyncing={syncAllConnectorsMutation.isPending}
-        isSyncAll
-        orphansByType={syncPreview?.orphans_by_type}
-        orphansAvailableByType={syncPreview?.orphans_available_by_type}
-        syncedCountByType={syncPreview?.synced_count_by_type}
-      />
+      <DeleteConfirmationDialog
+        open={showBulkUpdateDialog}
+        onOpenChange={setShowBulkUpdateDialog}
+        title={selectedRows.length > 1 ? "Update documents" : "Update document"}
+        description={`Re-read the stored original${selectedRows.length > 1 ? "s" : ""} for ${selectedRows.length} document${selectedRows.length > 1 ? "s" : ""}?`}
+        confirmText={selectedRows.length > 1 ? "Update all" : "Update"}
+        onConfirm={handleBulkUpdate}
+        isLoading={updateDocumentMutation.isPending}
+      >
+        <p className="my-2">
+          The existing chunks are removed and the document is ingested again
+          from the file stored in Langflow. Until that run finishes the document
+          is missing from the index.
+        </p>
+        <p className="my-2">Documents to be updated:</p>
+        {formatFilesToDelete(selectedRows)}
+      </DeleteConfirmationDialog>
     </>
   );
 }

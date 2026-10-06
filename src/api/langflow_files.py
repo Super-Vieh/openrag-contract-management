@@ -28,6 +28,11 @@ class RunIngestionBody(BaseModel):
     tweaks: dict | None = None
     settings: dict | None = None
 
+class UpdateFileBody(BaseModel):
+    filename: str
+    session_id: str | None = None
+    tweaks: dict | None = None
+    settings: dict | None = None
 
 class DeleteFilesBody(BaseModel):
     file_ids: list[str]
@@ -59,6 +64,77 @@ async def upload_user_file(
         import traceback
 
         logger.error("Full traceback", traceback=traceback.format_exc())
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+
+async def run_update_with_ingestion(
+    body: UpdateFileBody,
+    langflow_file_service=Depends(get_langflow_file_service),
+    session_manager=Depends(get_session_manager),
+    task_service=Depends(get_task_service),
+    user: User = Depends(require_permission("knowledge:upload")),
+):
+    """Re-ingest a file that already lives in Langflow's Files API.
+
+    The stored bytes are fetched BEFORE anything is deleted: an update removes
+    the existing chunks first and re-indexes afterwards, so losing the source in
+    between would leave the document missing from the index entirely.
+    """
+    try:
+        file_tuple = await langflow_file_service.download_user_file_by_name(body.filename)
+        if file_tuple is None:
+            return JSONResponse(
+                {"error": f"No stored file named '{body.filename}' to update"},
+                status_code=404,
+            )
+
+        _, content, _ = file_tuple
+
+        # Keep the original extension so Docling can detect the format.
+        suffix = os.path.splitext(body.filename)[1] or ".tmp"
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        temp_path = temp_file.name
+        temp_file.close()
+
+        try:
+            with open(temp_path, "wb") as f:
+                f.write(content)
+
+            task_id = await task_service.create_langflow_upload_task(
+                user_id=user.user_id,
+                file_paths=[temp_path],
+                langflow_file_service=langflow_file_service,
+                session_manager=session_manager,
+                # Without this the TEMP filename becomes the document name and
+                # duplicate detection would never match the stored document.
+                original_filenames={temp_path: body.filename},
+                jwt_token=user.jwt_token,
+                owner_name=user.name,
+                owner_email=user.email,
+                session_id=body.session_id,
+                tweaks=body.tweaks,
+                settings=body.settings,
+                # What makes this an update: the processor deletes the existing
+                # chunks instead of skipping the duplicate.
+                replace_duplicates=True,
+            )
+        except Exception:
+            from utils.file_utils import safe_unlink
+
+            safe_unlink(temp_path)
+            raise
+
+        return JSONResponse(
+            {
+                "task_id": task_id,
+                "filename": body.filename,
+                "message": f"Update task created for '{body.filename}'",
+            },
+            status_code=202,
+        )
+    except Exception as e:
+        logger.error("run_update_with_ingestion endpoint failed", error=str(e))
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
