@@ -1,0 +1,18 @@
+# --- MCP Server ---
+# Der Code nutzt die mcp-2.x-API (MCPServer, host/port als run()-Kwargs).
+# In 1.x heißt die Klasse FastMCP und run() nimmt kein host/port — ohne
+# diese Obergrenze zieht pip eine inkompatible Major-Version.
+mcp[cli]>=2,<3
+
+# --- Primäre Datenquelle: yfinance ---
+yfinance>=0.2.30
+
+# --- HTTP-Requests & Robustheit ---
+requests>=2.31.0
+tenacity>=8.2.0
+cachetools>=5.3.0
+
+# --- Optionale Fallback-Datenquellen ---
+# (können entfernt werden, wenn nicht benötigt)
+worldbank-commodities>=0.1.0
+myeia>=0.3.0

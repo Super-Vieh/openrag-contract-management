@@ -219,7 +219,30 @@ services:
       - LANGFLOW_ENABLE_SUPERUSER_CLI=${LANGFLOW_ENABLE_SUPERUSER_CLI}
       # - DEFAULT_FOLDER_NAME=OpenRAG
       - HIDE_GETTING_STARTED_PROGRESS=true
-      - LANGFLOW_SSRF_ALLOWED_HOSTS=${LANGFLOW_SSRF_ALLOWED_HOSTS:-localhost,127.0.0.1,host.docker.internal}
+      # mcp-commodity muss in der Liste stehen: der MCP-Server läuft im
+      # Compose-Netz, seine IP fällt unter die RFC-1918-Sperre (172.16/12),
+      # und der MCP-Baustein prüft den Hostnamen dagegen. Achtung: wird die
+      # Variable in .env überschrieben, muss mcp-commodity dort mit drin sein.
+      - LANGFLOW_SSRF_ALLOWED_HOSTS=${LANGFLOW_SSRF_ALLOWED_HOSTS:-localhost,127.0.0.1,host.docker.internal,mcp-commodity}
+
+  # Rohstoff-Preis-MCP-Server (Spot & Call-Offs) für Festpreisverträge und
+  # LTA Call-Offs. Liegt im Default-Netz, damit Langflow ihn über den
+  # Service-Namen erreicht: http://mcp-commodity:8080/mcp (streamable HTTP).
+  # Der Port-Publish dient nur dem Zugriff vom Host (Debugging, curl) —
+  # für Langflow selbst ist er nicht nötig.
+  # Achtung: der Transport ist streamable HTTP. Langflows aktiver MCP-Baustein
+  # unterstützt stdio und streamable HTTP, der SSE-Baustein ist deaktiviert.
+  mcp-commodity:
+    build:
+      context: ./mcp_server
+      dockerfile: Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-openrag}-mcp-commodity
+    ports:
+      - "${MCP_COMMODITY_PORT:-8080}:8080"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8080
+    restart: unless-stopped
 
   # Azurite: local Azure Storage emulator for manually testing the Azure Blob
   # connector without a paid Azure account. Opt-in only — gated behind the
