@@ -8,7 +8,6 @@ import {
   type GetRowIdParams,
   type IRowNode,
   themeQuartz,
-  type ValueFormatterParams,
   type ValueGetterParams,
 } from "ag-grid-community";
 import { AgGridReact, type CustomCellRendererProps } from "ag-grid-react";
@@ -47,11 +46,11 @@ import {
 import { useIsCloudBrand } from "@/contexts/brand-context";
 import { getConnectorDescriptor } from "@/lib/connectors/registry";
 import {
-  extractParameter,
-  extractParameterValue,
-  translateMetadataValue,
+  extractMetadataNumber,
+  formatMetadataField,
+  formatNumber,
+  type MetadataFieldOptions,
 } from "@/lib/contract-metadata";
-import { formatFileSize } from "@/lib/file-format";
 import { buildSearchPayloadFilters } from "@/lib/filter-normalization";
 import {
   buildKnowledgeTableRows,
@@ -133,7 +132,6 @@ function getSourceIcon(connectorType?: string) {
 
 const AG_FIELD_TO_SORT_BY: Record<string, string> = {
   filename: "filename",
-  size: "file_size",
   status: "status",
 };
 
@@ -142,24 +140,69 @@ function metadataOf(file?: File): Record<string, unknown> {
   return (file?.metadata ?? {}) as Record<string, unknown>;
 }
 
-/** Missing or non-array counts as none. */
-function listLength(value: unknown): number {
-  return Array.isArray(value) ? value.length : 0;
+/** Metadata columns sort client-side, as German text. */
+function compareOptionalText(valueA?: unknown, valueB?: unknown): number {
+  return String(valueA ?? "").localeCompare(String(valueB ?? ""), "de");
 }
 
-/** Sort rank for the tri-state Extraction column: yes > no > unknown. */
-function extractionRank(value: unknown): number {
-  if (value === true) return 1;
-  if (value === false) return 0;
-  return -1;
+/** Read one metadata path for display; missing values render as an empty cell. */
+function metadataText(
+  file: File | undefined,
+  path: string[],
+  options?: MetadataFieldOptions,
+): string | null {
+  return formatMetadataField(metadataOf(file), path, options);
 }
 
-/** Compare two optional numbers; missing values sort first. */
-function compareOptionalNumbers(a: number | null, b: number | null): number {
-  if (a === null && b === null) return 0;
-  if (a === null) return -1;
-  if (b === null) return 1;
-  return a - b;
+/** Plain metadata cell — a missing value renders as nothing. */
+function MetadataText({ value }: { value: unknown }) {
+  return typeof value === "string" && value ? (
+    <span className="truncate">{value}</span>
+  ) : null;
+}
+
+/** Money columns sort by their amount, not by the formatted "422500 EUR" text. */
+function compareMetadataAmount(path: string[]) {
+  return (
+    _valueA: unknown,
+    _valueB: unknown,
+    nodeA: IRowNode<File>,
+    nodeB: IRowNode<File>,
+  ): number => {
+    const a = extractMetadataNumber(metadataOf(nodeA.data), path);
+    const b = extractMetadataNumber(metadataOf(nodeB.data), path);
+    if (a === null && b === null) return 0;
+    if (a === null) return -1;
+    if (b === null) return 1;
+    return a - b;
+  };
+}
+
+type MetadataColumnOptions = MetadataFieldOptions & {
+  /** Replaces the default text ordering — money columns pass compareMetadataAmount. */
+  comparator?: ColDef<File>["comparator"];
+};
+
+/** One table column backed by a nested path into the document metadata. */
+function metadataColumn(
+  colId: string,
+  headerName: string,
+  path: string[],
+  isCloudBrand: boolean,
+  options: MetadataColumnOptions = {},
+): ColDef<File> {
+  return {
+    colId,
+    headerName,
+    ...(isCloudBrand ? { flex: 1, minWidth: 130 } : {}),
+    sortable: true,
+    valueGetter: (params: ValueGetterParams<File>) =>
+      metadataText(params.data, path, options),
+    comparator: options.comparator ?? compareOptionalText,
+    cellRenderer: ({ value }: CustomCellRendererProps<File>) => (
+      <MetadataText value={value} />
+    ),
+  };
 }
 
 /**
@@ -168,11 +211,12 @@ function compareOptionalNumbers(a: number | null, b: number | null): number {
  * backend to sort by them would silently fall back to filename.
  */
 const CLIENT_SORT_COLUMNS = new Set([
-  "warnings",
-  "errors",
-  "extraktion_korrekt",
-  "validierungsstatus",
-  "gesamtwert",
+  "material",
+  "supplier",
+  "start",
+  "end",
+  "contract_type",
+  "total",
 ]);
 
 function SearchPage() {
@@ -619,130 +663,42 @@ function SearchPage() {
         );
       },
     },
-    {
-      field: "size",
-      headerName: "Size",
-      ...(isCloudBrand ? { flex: 1, minWidth: 110 } : {}),
-      sortable: true,
-      comparator: () => 0,
-      valueFormatter: (params: ValueFormatterParams<File>) =>
-        params.value ? formatFileSize(params.value) : "-",
-      cellClass: isCloudBrand ? "text-muted-foreground" : undefined,
-    },
-    {
-      colId: "warnings",
-      headerName: "Warnings",
-      ...(isCloudBrand ? { flex: 1, minWidth: 120 } : {}),
-      sortable: true,
-      valueGetter: (params: ValueGetterParams<File>) =>
-        listLength(metadataOf(params.data).warnings),
-      comparator: (valueA?: number, valueB?: number) =>
-        (valueA ?? 0) - (valueB ?? 0),
-      cellRenderer: ({ value }: CustomCellRendererProps<File>) => {
-        const count = typeof value === "number" ? value : 0;
-        return (
-          <div
-            className={cn(
-              "inline-flex items-center gap-1",
-              count > 0
-                ? "text-accent-amber-foreground"
-                : "text-accent-emerald-foreground",
-            )}
-          >
-            {count > 0 ? `${count}` : "None"}
-          </div>
-        );
+    metadataColumn(
+      "material",
+      "Material",
+      ["contract", "material"],
+      isCloudBrand,
+    ),
+    metadataColumn(
+      "supplier",
+      "Supplier",
+      ["contract", "supplier"],
+      isCloudBrand,
+    ),
+    metadataColumn(
+      "start",
+      "Start",
+      ["contract", "term", "start"],
+      isCloudBrand,
+    ),
+    metadataColumn("end", "End", ["contract", "term", "end"], isCloudBrand),
+    metadataColumn(
+      "contract_type",
+      "Contract type",
+      ["contract_type"],
+      isCloudBrand,
+    ),
+    metadataColumn(
+      "total",
+      "Total",
+      ["contract", "pricing", "total"],
+      isCloudBrand,
+      {
+        unitPath: ["contract", "currency"],
+        format: formatNumber,
+        comparator: compareMetadataAmount(["contract", "pricing", "total"]),
       },
-    },
-    {
-      colId: "errors",
-      headerName: "Errors",
-      ...(isCloudBrand ? { flex: 1, minWidth: 110 } : {}),
-      sortable: true,
-      valueGetter: (params: ValueGetterParams<File>) =>
-        listLength(metadataOf(params.data).errors),
-      comparator: (valueA?: number, valueB?: number) =>
-        (valueA ?? 0) - (valueB ?? 0),
-      cellRenderer: ({ value }: CustomCellRendererProps<File>) => {
-        const count = typeof value === "number" ? value : 0;
-        return (
-          <div
-            className={cn(
-              "inline-flex items-center gap-1",
-              count > 0
-                ? "text-accent-red-foreground"
-                : "text-accent-emerald-foreground",
-            )}
-          >
-            {count > 0 ? `${count}` : "None"}
-          </div>
-        );
-      },
-    },
-    {
-      colId: "extraktion_korrekt",
-      headerName: "Extraction",
-      ...(isCloudBrand ? { flex: 1, minWidth: 130 } : {}),
-      sortable: true,
-      valueGetter: (params: ValueGetterParams<File>) =>
-        metadataOf(params.data).extraktion_korrekt,
-      comparator: (valueA?: unknown, valueB?: unknown) =>
-        extractionRank(valueA) - extractionRank(valueB),
-      cellRenderer: ({ value }: CustomCellRendererProps<File>) => {
-        if (typeof value !== "boolean") return null;
-        return (
-          <div
-            className={cn(
-              "inline-flex items-center gap-1",
-              value
-                ? "text-accent-emerald-foreground"
-                : "text-accent-red-foreground",
-            )}
-          >
-            {value ? "yes" : "no"}
-          </div>
-        );
-      },
-    },
-    {
-      colId: "validierungsstatus",
-      headerName: "Validation",
-      ...(isCloudBrand ? { flex: 1.6, minWidth: 200 } : {}),
-      sortable: true,
-      valueGetter: (params: ValueGetterParams<File>) => {
-        const status = metadataOf(params.data).status;
-        if (typeof status !== "string" || !status) return null;
-        return translateMetadataValue(status);
-      },
-      comparator: (valueA?: unknown, valueB?: unknown) =>
-        String(valueA ?? "").localeCompare(String(valueB ?? ""), "de"),
-      cellRenderer: ({ value }: CustomCellRendererProps<File>) =>
-        typeof value === "string" && value ? (
-          <span className="truncate">{value}</span>
-        ) : null,
-    },
-    {
-      colId: "gesamtwert",
-      headerName: "Total value",
-      ...(isCloudBrand ? { flex: 1.2, minWidth: 150 } : {}),
-      sortable: true,
-      valueGetter: (params: ValueGetterParams<File>) =>
-        extractParameter(metadataOf(params.data), "gesamtwert"),
-      comparator: (
-        _valueA,
-        _valueB,
-        nodeA: IRowNode<File>,
-        nodeB: IRowNode<File>,
-      ) =>
-        compareOptionalNumbers(
-          extractParameterValue(nodeA.data?.metadata, "gesamtwert"),
-          extractParameterValue(nodeB.data?.metadata, "gesamtwert"),
-        ),
-      cellRenderer: ({ value }: CustomCellRendererProps<File>) =>
-        typeof value === "string" && value ? (
-          <span className="truncate">{value}</span>
-        ) : null,
-    },
+    ),
     {
       field: "status",
       headerName: "Status",
@@ -750,8 +706,20 @@ function SearchPage() {
       sortable: true,
       valueGetter: (params: ValueGetterParams<File>) =>
         params.data?.status || "active",
-      comparator: (valueA?: File["status"], valueB?: File["status"]) =>
-        getStatusSortRank(valueA) - getStatusSortRank(valueB),
+      comparator: (
+        valueA?: File["status"],
+        valueB?: File["status"],
+        nodeA?: IRowNode<File>,
+        nodeB?: IRowNode<File>,
+      ) => {
+        const rank = getStatusSortRank(valueA) - getStatusSortRank(valueB);
+        if (rank !== 0) return rank;
+        // Same ingestion status -> order by the metadata verdict.
+        return compareOptionalText(
+          metadataText(nodeA?.data, ["status"]),
+          metadataText(nodeB?.data, ["status"]),
+        );
+      },
       cellRenderer: ({ data }: CustomCellRendererProps<File>) => {
         const status = data?.status || "active";
         const showOpenragRefreshCue =
@@ -776,6 +744,28 @@ function SearchPage() {
           );
         }
 
+        // The metadata verdict sits next to the ingestion status: "Active / ok".
+        // A missing verdict shows the ingestion status alone.
+        const verdict = metadataText(data, ["status"]);
+        const cell = (
+          <div className="inline-flex items-center gap-1.5 min-w-0">
+            <StatusBadge
+              status={status}
+              className={
+                status === "failed" ? "pointer-events-none" : undefined
+              }
+            />
+            {verdict ? (
+              <>
+                <span className="text-muted-foreground" aria-hidden="true">
+                  /
+                </span>
+                <span className="truncate">{verdict}</span>
+              </>
+            ) : null}
+          </div>
+        );
+
         if (status === "failed") {
           return (
             <button
@@ -794,12 +784,12 @@ function SearchPage() {
                 setRecentTasksExpanded(true);
               }}
             >
-              <StatusBadge status={status} className="pointer-events-none" />
+              {cell}
             </button>
           );
         }
 
-        return <StatusBadge status={status} />;
+        return cell;
       },
     },
     {
@@ -1170,11 +1160,11 @@ function SearchPage() {
               theme={themeQuartz.withParams({ browserColorScheme: "inherit" })}
               rowData={gridRows}
               rowSelection="multiple"
-              rowMultiSelectWithClick={false}
-              suppressRowClickSelection={true}
               getRowId={(params: GetRowIdParams<File>) =>
                 getFileIdentity(params.data)
               }
+              rowMultiSelectWithClick={false}
+              suppressRowClickSelection={true}
               isRowSelectable={(params) => isDeletableKnowledgeRow(params.data)}
               domLayout="normal"
               onGridReady={handleGridReady}
